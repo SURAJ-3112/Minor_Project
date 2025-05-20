@@ -1,0 +1,3 @@
+Undersampling of majority class (benign) using a sampling_strategy.
+SMOTE for oversampling rare malware classes (like rootkit, trojan-game, etc.).
+Ensures feature alignment between X_train and X_test.
