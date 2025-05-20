@@ -1,0 +1,3 @@
+Loads feature vectors (X, y) and metadata.
+Converts binary label 1 to malware categories using sha256 from metadata.
+Uses stratified split for X_train and X_test.
