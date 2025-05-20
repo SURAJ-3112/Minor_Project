@@ -1,0 +1,4 @@
+from sklearn.preprocessing import LabelEncoder
+le = LabelEncoder()
+y_train_encoded = le.fit_transform(y_train)
+y_test_encoded = le.transform(y_test)
