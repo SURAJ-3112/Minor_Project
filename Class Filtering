@@ -1,0 +1,2 @@
+Focuses only on major malware classes (e.g., trojan, ransomware, etc.).
+Drops rare ones like p2p-worm, trojan-game, rootkit.
