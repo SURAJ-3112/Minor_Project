@@ -1,0 +1,2 @@
+Trains RandomForestClassifier.
+Performs prediction and evaluates using accuracy_score.
