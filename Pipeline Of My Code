@@ -1,0 +1,829 @@
+import numpy as np
+import pandas as pd
+import os
+from scipy.sparse import csr_matrix
+from sklearn.model_selection import StratifiedShuffleSplit
+from scipy.stats import skew, boxcox
+from sklearn.preprocessing import PowerTransformer
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.pipeline import Pipeline
+from imblearn.pipeline import Pipeline as ImbPipeline
+from sklearn.preprocessing import RobustScaler
+from sklearn.preprocessing import QuantileTransformer
+from scipy.stats.mstats import winsorize
+from imblearn.under_sampling import RandomUnderSampler
+from imblearn.over_sampling import SMOTE
+from collections import Counter
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix,accuracy_score
+from catboost import CatBoostClassifier, Pool
+from xgboost import XGBClassifier
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.ensemble import VotingClassifier
+
+
+
+
+
+
+
+# Load feature vectors and labels
+data = np.load("E:\\PRACTICE_stuff\\bodmas.npz")
+print("Keys in bodmas.npz:", data.files)
+X = data["X"].astype(np.float32)  # Convert to float32 to save memory
+y = data["y"].astype(str)  # Convert all labels to strings
+
+# Load metadata and malware category
+metadata = pd.read_csv("E:\\PRACTICE_stuff\\bodmas_metadata.csv")
+malware_category = pd.read_csv("E:\\PRACTICE_stuff\\bodmas_malware_category.csv")
+
+# Format column names
+metadata.columns = metadata.columns.str.strip()
+malware_category.columns = malware_category.columns.str.strip()
+metadata = metadata.rename(columns={"sha": "sha256"})
+
+# Merge metadata with malware category
+merged_data = metadata.merge(malware_category, on="sha256", how="left")
+malware_dict = dict(zip(malware_category["sha256"], malware_category["category"]))
+
+# Identify malware samples
+malware_indices = np.where(y == "1")[0]
+print("Number of malware samples:", len(malware_indices))
+
+# Replace "1" with malware categories using sha256 match
+for idx in malware_indices:
+    sha_value = metadata.iloc[idx]["sha256"]
+    if sha_value in malware_dict:
+        y[idx] = malware_dict[sha_value]
+
+print("Unique values in y after update:", np.unique(y))
+
+# Stratified split of dataset
+sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+for train_index, test_index in sss.split(X, y):
+    X_train, X_test = X[train_index], X[test_index]
+    y_train, y_test = y[train_index], y[test_index]
+
+# Convert training dataset to DataFrame
+df = pd.DataFrame(X_train)
+
+# Compute skewness and identify highly skewed features
+skew_values = df.apply(lambda x: skew(x), axis=0)
+highly_skewed_features = skew_values[abs(skew_values) > 1].index
+print("Highly Skewed Features:", list(highly_skewed_features))
+
+# Identify constant features
+constant_features = df.columns[df.nunique() == 1]
+print("Constant Features:", list(constant_features))
+
+# Drop constant features
+df = df.drop(columns=constant_features)
+print("Shape after dropping constant features:", df.shape)
+
+# Compute skewness after dropping constant features
+skew_values = df.apply(lambda x: skew(x), axis=0)
+print("Skewness after dropping constant features:", skew_values)
+
+# Recheck for constant or near-constant features
+constant_features = df.nunique()[df.nunique() == 1].index
+print("Near-constant features:", list(constant_features))
+if len(constant_features) > 0:
+    df = df.drop(columns=constant_features)
+
+# Convert to sparse matrix to save memory
+X_train_sparse = csr_matrix(X_train)
+X_test_sparse = csr_matrix(X_test)
+
+
+
+# Shift data before applying log transformation
+shift_value = np.min(X_train)
+X_train_shifted = X_train - shift_value + 1
+X_test_shifted = X_test - shift_value + 1
+
+print("Min in Shifted X_train:", np.min(X_train_shifted))
+print("Min in Shifted X_test:", np.min(X_test_shifted))
+
+# Apply transformations
+X_train_log = np.log1p(X_train_shifted)
+X_test_log = np.log1p(X_test_shifted)
+
+
+
+X_train_log10 = np.log10(X_train_shifted)
+X_test_log10 = np.log10(X_test_shifted)
+print("Skewness after log base 10 transformation:", skew(X_train_log10), skew(X_test_log10))
+
+
+scaler = RobustScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)  # Use same fit on test set
+
+
+
+# Compute skewness after RobustScaler
+skew_values_scaled = np.apply_along_axis(skew, 0, X_train_scaled)
+print("Skewness after RobustScaler:", skew_values_scaled)
+
+
+
+qt = QuantileTransformer(output_distribution="normal", random_state=42)
+X_train_transformed = qt.fit_transform(X_train_scaled)
+X_test_transformed = qt.transform(X_test_scaled)
+
+# Check skewness again
+skew_values_transformed = np.apply_along_axis(skew, 0, X_train_transformed)
+print("Skewness after QuantileTransformer:", skew_values_transformed)
+
+
+
+# Apply Winsorization at the 1st and 99th percentiles
+X_train_winsorized = np.apply_along_axis(lambda x: winsorize(x, limits=[0.01, 0.01]), axis=0, arr=X_train_transformed)
+X_test_winsorized = np.apply_along_axis(lambda x: winsorize(x, limits=[0.01, 0.01]), axis=0, arr=X_test_transformed)
+
+# Check skewness again
+skew_values_winsorized = np.apply_along_axis(skew, 0, X_train_winsorized)
+print("Skewness after Winsorization:", skew_values_winsorized)
+
+# Identify features that still have skewness > 2.0
+high_skew_features = np.where(abs(skew_values_winsorized) > 2.0)[0]
+
+print(f"Features still highly skewed: {high_skew_features}")
+print(f"Number of high-skew features: {len(high_skew_features)}")
+
+
+
+
+# Convert X_train to DataFrame (use column names if available)
+X_train = pd.DataFrame(X_train)  
+X_test = pd.DataFrame(X_test)
+
+# Calculate skewness
+feature_skewness = X_train.apply(lambda x: skew(x.dropna()))
+
+
+
+# Calculate skewness again
+feature_skewness = X_train.apply(lambda x: skew(x.dropna()))
+
+# Sort features by skewness
+skewed_features = feature_skewness[abs(feature_skewness) > 2].sort_values(ascending=False)
+
+# Check the most skewed features
+print(skewed_features[:20])  # Top 20 most skewed
+
+ #Reduce Skewness for 20 Features
+
+
+
+for col in [647, 907, 933, 857, 2353, 722, 283, 277, 703, 513, 285, 264, 261, 
+            707, 687, 807, 299, 715, 709, 711]:  
+    X_train[col] = winsorize(X_train[col], limits=[0.05, 0.05])  # Limit top & bottom 5%
+
+
+
+
+# Store original min/max values
+original_stats = pd.DataFrame(index=[647, 907, 933, 857, 2353, 722, 283, 277, 703, 513, 285, 264, 261, 
+                                     707, 687, 807, 299, 715, 709, 711])
+original_stats["Before_Min"] = X_train[original_stats.index].min()
+original_stats["Before_Max"] = X_train[original_stats.index].max()
+
+# Apply Winsorization
+for col in original_stats.index:
+    X_train[col] = winsorize(X_train[col], limits=[0.05, 0.05])
+
+# Store new min/max values
+original_stats["After_Min"] = X_train[original_stats.index].min()
+original_stats["After_Max"] = X_train[original_stats.index].max()
+
+# Compare before & after
+print(original_stats)
+
+
+
+
+log_transform_cols = [2353, 707]  # Large values
+X_train[log_transform_cols] = X_train[log_transform_cols].apply(lambda x: np.log1p(x))
+
+X_train.drop(columns=[687], inplace=True)
+
+
+
+scaler = RobustScaler()
+X_train[[513, 715]] = scaler.fit_transform(X_train[[513, 715]])
+
+skewness_after = {col: skew(X_train[col]) for col in [2353, 513, 707, 715]}
+print(skewness_after)
+
+
+
+
+X_train[513] = np.log1p(X_train[513])
+
+X_train[715] = winsorize(X_train[715], limits=[0.10, 0.10])  # Trim 10% tails
+
+skewness_after = {col: skew(X_train[col]) for col in [513, 715]}
+print(skewness_after)
+
+
+
+
+
+
+print("Class distribution in y_train:")
+print(pd.Series(y_train).value_counts(normalize=True))
+
+print("\nClass distribution in y_test:")
+print(pd.Series(y_test).value_counts(normalize=True))
+
+#Use a Dictionary for Multi-Class Undersampling
+from collections import Counter
+
+# Check the original class distribution
+print("Original class distribution:", Counter(y_train))
+
+#Define a Custom Undersampling Strategy
+
+from imblearn.under_sampling import RandomUnderSampler
+
+# Set the desired sample count for each class (adjust as needed)
+sampling_strategy = {
+    "0": int(Counter(y_train)["trojan"] * 2),  # Reduce benign class
+    "trojan": Counter(y_train)["trojan"],  # Keep the rest unchanged
+    "worm": Counter(y_train)["worm"],
+    "backdoor": Counter(y_train)["backdoor"],
+    "downloader": Counter(y_train)["downloader"],
+    "ransomware": Counter(y_train)["ransomware"],
+    "dropper": Counter(y_train)["dropper"],
+    "information": Counter(y_train)["information"],
+    "virus": Counter(y_train)["virus"],
+    "pua": Counter(y_train)["pua"],
+    "cryptominer": Counter(y_train)["cryptominer"],
+    "p2p-worm": Counter(y_train)["p2p-worm"],
+    "exploit": Counter(y_train)["exploit"],
+    "trojan-game": Counter(y_train)["trojan-game"],
+    "rootkit": Counter(y_train)["rootkit"],
+}
+
+# Apply undersampling
+under_sampler = RandomUnderSampler(sampling_strategy=sampling_strategy, random_state=42)
+X_train_under, y_train_under = under_sampler.fit_resample(X_train, y_train)
+
+# Check the new class distribution
+print("After undersampling:", Counter(y_train_under))
+
+
+
+
+# Plot after undersampling
+# plt.figure(figsize=(10, 5))
+# sns.barplot(x=list(Counter(y_train_under).keys()), y=list(Counter(y_train_under).values()))
+# plt.title("Class Distribution After Undersampling")
+# plt.xticks(rotation=45)
+# plt.tight_layout()
+# plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#Implement SMOTE
+
+###manually add samples for very rare categories like trojan-game, rootkit, and p2p-worm
+###Using SMOTE with a Custom Strategy###
+
+
+# Check class distribution before balancing
+print("Before SMOTE:", Counter(y_train_under))
+
+# Define custom sampling strategy for rare classes
+smote_strategy = {
+    "rootkit": 50,        # Increase to at least 50 samples
+    "trojan-game": 100,   # Increase to 100 samples
+    "p2p-worm": 100,      # Increase to 100 samples
+    "exploit": 200,       # Increase samples for exploit class
+}
+
+# Apply SMOTE only for rare classes
+smote = SMOTE(sampling_strategy=smote_strategy, random_state=42, k_neighbors=1)  # k_neighbors=1 prevents errors
+X_train_balanced, y_train_balanced = smote.fit_resample(X_train_under, y_train_under)
+
+
+
+
+if 687 in X_test.columns:
+    X_test = X_test.drop(columns=[687])
+
+# Align columns of test data with training data
+X_test = X_test[X_train_balanced.columns]
+
+# Final sanity check
+print("Train shape:", X_train_balanced.shape)
+print("Test shape :", X_test.shape)
+print("Train columns == Test columns:", list(X_train_balanced.columns) == list(X_test.columns))
+
+
+
+
+
+
+############ Step 1: Drop minor classes#################
+
+
+
+major_classes = [
+    "trojan", "ransomware", "worm", "backdoor", 
+    "downloader", "virus", "dropper", "information"
+]
+
+train_mask = pd.Series(y_train).isin(major_classes)
+X_train = X_train[train_mask]
+y_train = y_train[train_mask]
+
+test_mask = pd.Series(y_test).isin(major_classes)
+X_test = X_test[test_mask]
+y_test = y_test[test_mask]
+
+
+#print(X_train.shape, y_train.value_counts())
+print(X_train.shape, pd.Series(y_train).value_counts())
+
+
+
+
+# Convert to Pandas Series if needed
+y_train = pd.Series(y_train)
+y_test = pd.Series(y_test)
+
+
+
+# Now reset index
+X_train = X_train.reset_index(drop=True)
+y_train = y_train.reset_index(drop=True)
+X_test = X_test.reset_index(drop=True)
+y_test = y_test.reset_index(drop=True)
+
+
+# Step 2: Reset index to clean up any leftover indexing
+X_train = X_train.reset_index(drop=True)
+y_train = y_train.reset_index(drop=True)
+X_test = X_test.reset_index(drop=True)
+y_test = y_test.reset_index(drop=True)
+
+
+
+
+
+
+
+
+
+
+#----------------Initialize the Random Forest model----------------------
+
+
+
+
+rf_model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+
+# Train the model on training data
+rf_model.fit(X_train, y_train)
+
+
+# Predict on the test data
+y_pred = rf_model.predict(X_test)
+
+
+# Print evaluation metrics
+print("Random Forest Accuracy:", accuracy_score(y_test, y_pred))
+#print("\nClassification Report:\n", classification_report(y_test, y_pred, zero_division=0))
+#print("\nConfusion Matrix:\n", confusion_matrix(y_test, y_pred))
+
+
+from sklearn.model_selection import GridSearchCV
+
+# Set the parameters for GridSearch
+#param_grid = {
+    #'n_estimators': [100, 200, 300],
+    #'max_depth': [None, 10, 20],
+    #'min_samples_split': [2, 5, 10],
+    #'min_samples_leaf': [1, 2, 4]
+#}
+
+#grid_search = GridSearchCV(estimator=RandomForestClassifier(random_state=42), 
+                           #param_grid=param_grid, 
+                           #cv=5, 
+                           #n_jobs=-1, 
+                           #verbose=2)
+
+# Fit the grid search
+#grid_search.fit(X_train, y_train)
+
+# Best parameters and score
+#print(f"Best parameters: {grid_search.best_params_}")
+#print(f"Best score: {grid_search.best_score_}")
+
+
+from sklearn.model_selection import cross_val_score
+
+# Perform cross-validation
+cv_scores = cross_val_score(rf_model, X_train, y_train, cv=5)
+print(f"Cross-validation scores: {cv_scores}")
+print(f"Mean CV score: {cv_scores.mean()}")
+
+
+# Using class_weight='balanced' automatically adjusts weights for imbalanced classes
+rf_model_balanced = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced', n_jobs=-1)
+
+# Train the balanced model
+rf_model_balanced.fit(X_train, y_train)
+
+# Evaluate the balanced model
+y_pred_balanced = rf_model_balanced.predict(X_test)
+print(f"Balanced Random Forest Accuracy: {accuracy_score(y_test, y_pred_balanced)}")
+
+
+
+
+
+
+#--------------CatBoostClassifier------------------
+
+
+model = CatBoostClassifier(
+    iterations=300,             # like n_estimators
+    depth=6,                    # like max_depth
+    learning_rate=0.1,
+    loss_function='MultiClass', # for multi-class classification
+    verbose=100,                # shows progress every 100 iterations
+    random_seed=42
+)
+
+model.fit(X_train, y_train)
+
+
+#test the model 
+y_pred = model.predict(X_test)
+acc = accuracy_score(y_test, y_pred)
+print("CatBoost Accuracy:", acc)
+# Classification report
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred, zero_division=0))
+
+
+#-----------------voting ensemble----------
+
+
+
+
+# Define base models that support string labels
+rf = RandomForestClassifier(random_state=42)
+cb = CatBoostClassifier(verbose=0, loss_function='MultiClass', random_seed=42)
+
+# Combine them in a voting classifier
+voting_clf = VotingClassifier(estimators=[
+    ('rf', rf),
+    ('cb', cb)
+], voting='soft')  # use 'soft' to consider probabilities
+
+# Train on string-labeled target
+voting_clf.fit(X_train, y_train)
+
+# Predict on test set
+y_pred = voting_clf.predict(X_test)
+
+# Calculate and show accuracy
+accuracy = accuracy_score(y_test, y_pred)
+print("Voting Ensemble Accuracy:", accuracy)
+# Classification report
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred, zero_division=0))
+
+
+
+
+#HistGradientBoostingClassifie
+
+
+
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+
+# Example training and testing dataset (assuming X_train, X_test, y_train, y_test are defined)
+# Train the model
+model = HistGradientBoostingClassifier(max_iter=300, learning_rate=0.1, random_state=42)
+model.fit(X_train, y_train)
+
+# Predict using the model
+y_pred = model.predict(X_test)
+
+# Evaluate the model
+accuracy = accuracy_score(y_test, y_pred)
+print("HistGradientBoostingClassifier Accuracy:", accuracy)
+
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred, zero_division=0))
+
+
+
+#----------Unsupervised learning Algorithms---------
+
+import pandas as pd
+import os
+
+# Example: assuming you have X_resampled and y_resampled from your preprocessing
+# If y_resampled is a NumPy array, convert it to a Pandas Series
+y_resampled_series = pd.Series(y_train_balanced, name='label')
+
+# Combine features and labels into one DataFrame
+df_final = pd.concat([X_train_balanced, y_resampled_series], axis=1)
+
+# Create the 'data' directory if it doesn't exist
+os.makedirs("data", exist_ok=True)
+
+# Save the final dataset
+df_final.to_csv("data/your_preprocessed_dataset.csv", index=False)
+print("Dataset saved successfully!")
+
+
+print(os.getcwd())  # Shows current directory
+print(os.listdir("data"))  # Lists files in the 'data' folder
+
+
+
+import pandas as pd
+
+# Load dataset
+#df = pd.read_csv("your_preprocessed_dataset.csv")
+df = pd.read_csv("data/your_preprocessed_dataset.csv")
+
+# View basic info
+print(df.shape)
+print(df.columns)
+
+
+
+
+
+# Load your dataset
+import pandas as pd
+
+df = pd.read_csv("data/your_preprocessed_dataset.csv", low_memory=False)
+
+# Separate features and label
+X = df.drop("label", axis=1)
+y = df["label"]
+
+# Detect non-numeric columns
+non_numeric_cols = X.select_dtypes(include=['object', 'category']).columns
+print("String columns to encode:", list(non_numeric_cols))
+
+#_train.to_csv("X_train_processed.csv", index=False)
+#_train.to_csv("y_train_processed.csv", index=False)
+
+import pandas as pd
+
+# Saving preprocessed data
+X_train.to_pickle("X_train_processed.pkl")
+X_test.to_pickle("X_test_processed.pkl")
+y_train.to_pickle("y_train_processed.pkl")
+y_test.to_pickle("y_test_processed.pkl")
+
+print("Preprocessed data saved successfully.")
+
+# Collect all model accuracies
+model_names = [
+    "Random Forest",
+    "Balanced RF",
+    "CatBoost",
+    "Voting Ensemble",
+    "HistGradientBoosting"
+]
+
+accuracies = [
+    accuracy_score(y_test, rf_model.predict(X_test)),
+    accuracy_score(y_test, rf_model_balanced.predict(X_test)),
+    accuracy_score(y_test, model.predict(X_test)),  # CatBoost
+    accuracy_score(y_test, voting_clf.predict(X_test)),
+    accuracy_score(y_test, HistGradientBoostingClassifier(max_iter=300, learning_rate=0.1, random_state=42).fit(X_train, y_train).predict(X_test))
+]
+
+
+
+
+
+
+
+
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Create a dataframe for plotting
+import pandas as pd
+results_df = pd.DataFrame({
+    "Model": model_names,
+    "Accuracy": accuracies
+})
+
+# Plot the accuracies
+plt.figure(figsize=(10, 6))
+sns.barplot(x="Model", y="Accuracy", data=results_df, palette="viridis")
+plt.title("Comparative Accuracy of ML Models for Malware Detection")
+plt.ylim(0, 1)
+plt.ylabel("Accuracy Score")
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+
+
+plt.savefig("model_comparison_accuracy.png", dpi=300)
+print("Plot saved as 'model_comparison_accuracy.png'")
+
+##----------Deep learning-------------##
+
+
+
+
+
+# Count columns by data type
+#string_cols = df.select_dtypes(include=['object']).columns
+#numeric_cols = df.select_dtypes(include=[np.number]).columns
+
+#print(f"Number of string columns: {len(string_cols)}")
+#print(f"String columns: {list(string_cols)}\n")
+
+#print(f"Number of numerical columns: {len(numeric_cols)}")
+#print(f"Numerical columns: {list(numeric_cols)}")
+
+
+
+
+
+
+############ Step 2: Drop minor classes#################
+
+
+
+major_classes = [
+    "trojan", "ransomware", "worm", "backdoor", 
+    "downloader", "virus", "dropper", "information"
+]
+
+train_mask = pd.Series(y_train).isin(major_classes)
+X_train = X_train[train_mask]
+y_train = y_train[train_mask]
+
+test_mask = pd.Series(y_test).isin(major_classes)
+X_test = X_test[test_mask]
+y_test = y_test[test_mask]
+
+
+#print(X_train.shape, y_train.value_counts())
+print(X_train.shape, pd.Series(y_train).value_counts())
+
+
+
+from sklearn.preprocessing import LabelEncoder
+
+# Assuming 'df' is your dataframe and 'label' is the target column
+label_encoder = LabelEncoder()
+
+# Fit and transform the 'label' column to numerical format
+df['label'] = label_encoder.fit_transform(df['label'])
+df_original = df.copy()
+
+
+# Print the class mapping and the first few rows to confirm
+print("Class mapping (string ➜ numeric):")
+for class_name, class_value in zip(label_encoder.classes_, range(len(label_encoder.classes_))):
+    print(f"  '{class_name}' ➜ {class_value}")
+
+print("\nThe 'label' column has been successfully converted to numeric format:")
+print(df['label'].head())
+
+
+
+
+# List of major class labels (after encoding)
+major_labels = [0, 1, 3, 9, 4, 6, 13, 14]  # These are the numeric labels of major classes
+
+# Filter the dataset to keep only the major classes
+df_major = df[df['label'].isin(major_labels)]
+
+# Check the shape of the filtered dataset
+print(f"Filtered dataset shape: {df_major.shape}")
+
+# Proceed with training the deep learning model
+
+
+# Assuming df_original is your original dataset before filtering
+# and df_filtered is your dataset after dropping minor classes
+
+
+
+
+
+
+import pandas as pd
+
+# Read the data
+df_original = pd.read_csv("data/your_preprocessed_dataset.csv", low_memory=False)  # Adjust path if necessary
+
+# Get label distribution
+original_labels = df_original['label'].value_counts()
+
+# Define the threshold for minor classes (e.g., classes with fewer than 1000 samples are considered minor)
+threshold = 150
+
+# Identify minor classes (those with fewer than the threshold)
+minor_classes = original_labels[original_labels < threshold].index
+
+# Filter out rows where the class is considered minor
+df_filtered = df_original[~df_original['label'].isin(minor_classes)]
+
+# Check the resulting class distribution
+filtered_labels = df_filtered['label'].value_counts()
+
+# Identify and print dropped minor classes
+dropped_classes = set(minor_classes)
+
+print("Dropped Minor Classes:")
+for cls in dropped_classes:
+    print(f"{cls}: {original_labels[cls]}")
+
+# Optionally, print the remaining classes to confirm major classes are kept
+print("\nRemaining Classes after Filtering:")
+print(filtered_labels)
+
+
+
+
+
+
+
+
+
+
+
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split
+
+# Example: Scaling and one-hot encoding (for categorical features if any)
+scaler = StandardScaler()
+encoder = OneHotEncoder()
+
+# Assuming 'X' is your feature set and 'y' is the target variable
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Preprocessing pipeline
+preprocessor = ColumnTransformer(transformers=[
+    ('scaler', scaler, ['feature1', 'feature2', 'feature3']),  # Replace with actual feature columns
+    ('encoder', encoder, ['categorical_feature_column'])      # Replace with actual categorical columns if any
+])
+
+
+
+#print("Columns in X_train:", X_train.columns.tolist())
+
+# X_train = preprocessor.fit_transform(X_train)
+# X_test = preprocessor.transform(X_test)
+
+
+
+
+
+# Collect all model accuracies
+model_names = [
+    "Random Forest",
+    "Balanced RF",
+    "CatBoost",
+    "Voting Ensemble",
+    "HistGradientBoosting"
+]
+
+accuracies = [
+    accuracy_score(y_test, rf_model.predict(X_test)),
+    accuracy_score(y_test, rf_model_balanced.predict(X_test)),
+    accuracy_score(y_test, model.predict(X_test)),  # CatBoost
+    accuracy_score(y_test, voting_clf.predict(X_test)),
+    accuracy_score(y_test, HistGradientBoostingClassifier(max_iter=300, learning_rate=0.1, random_state=42).fit(X_train, y_train).predict(X_test))
+]
+
+
+
