@@ -1,0 +1,3 @@
+from sklearn.metrics import classification_report, confusion_matrix
+print("\nClassification Report:\n", classification_report(y_test_encoded, y_pred, target_names=le.classes_))
+print("\nConfusion Matrix:\n", confusion_matrix(y_test_encoded, y_pred))
