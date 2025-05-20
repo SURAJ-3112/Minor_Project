@@ -1,0 +1,6 @@
+dentifies constant and highly skewed features.
+Applies:
+Log transforms
+Winsorization
+RobustScaler and QuantileTransformer
+Column-wise transformation based on individual skew values.
