@@ -1,0 +1,4 @@
+Imbalanced Learning: Smart mix of RandomUnderSampler and SMOTE with k_neighbors=1 for rare classes.
+ Column Alignment: Ensures both X_train and X_test have the same columns after dropping or transforming.
+ Skewness Reduction: Uses multiple transformations including log and winsorization.
+Class Cleanup: Removes minor classes to focus training on well-represented categories.
